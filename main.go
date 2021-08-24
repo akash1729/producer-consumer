@@ -14,22 +14,90 @@ func createRandom(min, max int) int {
 	return rand.Intn(max-min+1) + 1
 }
 
-// producer
-func producer(channel chan bool) {
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
 
-	resources := createRandom(1, 3)
+// Function to consume values from a producer is resources are available
+func consumeFromProducer(producerData *chan bool, consumeLimit int) (int, bool) {
 
-	for i := 0; i < resources; i++ {
-		// as a dummy resource, boolean value true is used
-		channel <- true
+	var consumed int
+
+	// read consumeLimit number of resources from the producer producerData
+	for consumed <= consumeLimit {
+
+		select {
+
+		case <-*producerData:
+			// values are available in the producer, then read the values
+
+			consumed++
+
+			for consumed < consumeLimit {
+
+				select {
+
+				case <-*producerData:
+					// read one value
+					consumed++
+
+				default:
+
+					// finished reading all values from producer, return number of resorces read and true flag for successfull read
+					return consumed, true
+				}
+			}
+
+			// succesfull consumed required num of resources, return number of resorces read and true flag for successfull read
+			return consumed, true
+
+		default:
+			// if values are not available in the producer return false value
+
+			return 0, false
+			// producer is empty, awake producer
+			//awakeSignals[producerIndex] <- true
+		}
 	}
 
-	fmt.Println("produced ", resources)
+	// after succesfull consumption, return the number of resorces consumed and true flag for successfull read
+	return consumed, true
+}
 
+// producer
+// in this design, once a producer is launched, it will contiue to produce resources when even it gets an awake signal
+// in case of no awake signal, producer sleeps waiting for awake signal
+func producer(dataChannel chan bool, awakeSignal chan bool) {
+
+	// keep on producing resources in batches when awakeSignal is received
+	for {
+
+		select {
+
+		// producer waits for awake signal to start producing
+		case <-awakeSignal:
+			// if awake signal is passed to producer
+
+			resources := createRandom(1, 3)
+
+			for i := 0; i < resources; i++ {
+				// as a dummy resource, boolean value true is used
+				// since the channel is buffered, producer will be blocked here when channel is full
+				dataChannel <- true
+			}
+
+			fmt.Println("produced ", resources)
+
+		}
+
+	}
 }
 
 // consumer
-func consumer(producerChannels []chan bool, wg *sync.WaitGroup) {
+func consumer(producerDataChannels []chan bool, awakeSignals []chan bool, wg *sync.WaitGroup) {
 
 	// waitGroup for consumer to finish
 	defer wg.Done()
@@ -38,9 +106,9 @@ func consumer(producerChannels []chan bool, wg *sync.WaitGroup) {
 	storage := 0
 
 	// run for 10 batch
-	for batch := 0; batch < 10; batch++ {
 
-		producerIndex := 0
+	producerIndex := 0
+	for batch := 0; batch < 10; batch++ {
 
 		for {
 
@@ -53,44 +121,31 @@ func consumer(producerChannels []chan bool, wg *sync.WaitGroup) {
 				break
 			}
 
+			// consume b/w 1 and 3 resources at a time
 			getNum := createRandom(1, 3)
-			// rotate through the four producers
-
 			consumed := 0
-			for consumed < getNum && storage < 10 {
-				producerIndex %= 3
 
-				select {
+			// rotate through the four producers
+			for storage < 10 && consumed < getNum {
 
-				case <-producerChannels[producerIndex]:
-					// values are available in the producer
+				toConsume := min(getNum-consumed, 10-storage)
 
-					consumed++
-					storage++
+				if value, alive := consumeFromProducer(&producerDataChannels[producerIndex], toConsume); alive {
+					// producer was alive and returned values
+					storage += value
+					consumed += value
 
-					var channelCleared bool
-					for consumed < getNum && storage < 10 && !channelCleared {
-
-						select {
-
-						case <-producerChannels[producerIndex]:
-							// read one value
-							consumed++
-							storage++
-
-						default:
-							// finished reading from producer, move to next producer
-							producerIndex++
-							channelCleared = true
-						}
-					}
-
-				default:
-					// producer is empty, awake producer
-					go producer(producerChannels[producerIndex])
+				} else {
+					// producer is empty, awake the producer and try again
+					awakeSignals[producerIndex] <- true
+					continue
 				}
 
+				// move to next producer
+				producerIndex = (producerIndex + 1) % 3
+
 			}
+
 			fmt.Println("consumed ", consumed)
 
 		}
@@ -101,24 +156,37 @@ func main() {
 
 	fmt.Println("started")
 
-	producerChannels := []chan bool{
+	producerDataChannels := []chan bool{
 		make(chan bool, 10),
 		make(chan bool, 10),
 		make(chan bool, 10),
 		make(chan bool, 10),
 	}
 
-	go producer(producerChannels[0])
-	go producer(producerChannels[1])
-	go producer(producerChannels[2])
-	go producer(producerChannels[3])
+	// awake signal to start producer
+	awakeSignals := []chan bool{
+		make(chan bool, 2),
+		make(chan bool, 2),
+		make(chan bool, 2),
+		make(chan bool, 2),
+	}
+
+	// awake all producers by default once
+	for _, channel := range awakeSignals {
+		channel <- true
+	}
+
+	go producer(producerDataChannels[0], awakeSignals[0])
+	go producer(producerDataChannels[1], awakeSignals[1])
+	go producer(producerDataChannels[2], awakeSignals[2])
+	go producer(producerDataChannels[3], awakeSignals[3])
 
 	var wg sync.WaitGroup
 
 	wg.Add(2)
 
-	go consumer(producerChannels, &wg)
-	go consumer(producerChannels, &wg)
+	go consumer(producerDataChannels, awakeSignals, &wg)
+	go consumer(producerDataChannels, awakeSignals, &wg)
 
 	wg.Wait()
 
